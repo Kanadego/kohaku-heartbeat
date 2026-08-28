@@ -1,0 +1,15 @@
+{
+  "_comment": "琥珀的心跳 · 宪章参数。修改前先读 DESIGN.md §2 三部宪章。数值为初值，以运行反馈为准。",
+  "max_daily_send": 3,
+  "cooldown_minutes": 30,
+  "quiet_hours": {
+    "start": "01:00",
+    "end": "08:00",
+    "_comment": "深夜静默窗：期间心跳照常反刍但绝不表达"
+  },
+  "seed_ttl_days": 14,
+  "seed_retire_after_surfaces": 2,
+  "seed_pool_cap": 100,
+  "log_retention_days": 30,
+  "env_pulse_retention_hours": 48
+}
