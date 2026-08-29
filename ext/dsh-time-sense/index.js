@@ -58,9 +58,11 @@ const apply = (ctx) => {
   });
 
   // 2) 系统提示注入段：组装时按标记决定是否给时间
+  //    order=999（末尾）——关键：时间戳每轮变化，若放前缀会破坏
+  //    DeepSeek 前缀缓存导致全部历史未命中；放末尾则历史前缀不变、缓存全保
   const disposer = ctx.systemPrompt.section({
     name: SECTION_TIME,
-    order: 0.2,
+    order: 999,
     text: () => {
       if (!injectTime) return '';                       // 正事/未标记：不注入
       return fmtTime(new Date());
