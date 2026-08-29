@@ -14,6 +14,8 @@
 //   - 不申请额外系统权限；内存标记每轮重置，不累积历史。
 
 const SECTION_TIME = 'dsh-time-sense:now';
+const name = 'dsh-time-sense';
+const inject = ['systemPrompt'];
 
 function fmtTime(d) {
   const week = ['日', '一', '二', '三', '四', '五', '六'][d.getDay()];
@@ -34,42 +36,37 @@ function looksCasual(text) {
   return t.length >= 2;
 }
 
-module.exports = (ctx) => {
-  const inject = ['systemPrompt'];
-  const name = 'dsh-time-sense';
+const apply = (ctx) => {
+  let injectTime = false;   // 内存标记：本 peek 组装是否注入（每轮由事件刷新）
 
-  const apply = () => {
-    let injectTime = false;   // 内存标记：本 peek 组装是否注入（每轮由事件刷新）
+  // 1) 订阅会话事件：刷新"是否注入"标记
+  const off = ctx.on('session/event', (ev) => {
+    try {
+      if (!ev || ev.type !== 'user/message') return;
+      const content = ev.content ?? '';
+      const text = typeof content === 'string' ? content : JSON.stringify(content);
+      if (text.includes('[SCHEDULE REMINDER]')) {
+        injectTime = true;                              // 心跳：无条件
+      } else {
+        injectTime = looksCasual(text);                 // 闲聊：启发式
+      }
+    } catch { injectTime = false; /* 任何异常回落为不注入 */ }
+  });
 
-    // 1) 订阅会话事件：刷新"是否注入"标记
-    const off = ctx.on('session/event', (ev) => {
-      try {
-        if (!ev || ev.type !== 'user/message') return;
-        const content = ev.content ?? '';
-        const text = typeof content === 'string' ? content : JSON.stringify(content);
-        if (text.includes('[SCHEDULE REMINDER]')) {
-          injectTime = true;                              // 心跳：无条件
-        } else {
-          injectTime = looksCasual(text);                 // 闲聊：启发式
-        }
-      } catch { injectTime = false; /* 任何异常回落为不注入 */ }
-    });
+  // 2) 系统提示注入段：组装时按标记决定是否给时间
+  const disposer = ctx.systemPrompt.section({
+    name: SECTION_TIME,
+    order: 0.2,
+    text: () => {
+      if (!injectTime) return '';                       // 正事/未标记：不注入
+      return fmtTime(new Date());
+    },
+  });
 
-    // 2) 系统提示注入段：组装时按标记决定是否给时间
-    const disposer = ctx.systemPrompt.section({
-      name: SECTION_TIME,
-      order: 0.2,
-      text: () => {
-        if (!injectTime) return '';                       // 正事/未标记：不注入
-        return fmtTime(new Date());
-      },
-    });
-
-    return () => {
-      try { off(); } catch { /* ignore */ }
-      try { disposer(); } catch { /* ignore */ }
-    };
+  return () => {
+    try { off(); } catch { /* ignore */ }
+    try { disposer(); } catch { /* ignore */ }
   };
-
-  return { name, apply, inject };
 };
+
+module.exports = { name, apply, inject };
