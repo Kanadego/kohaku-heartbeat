@@ -4,7 +4,12 @@
   "description": "时间感知：心跳轮次与闲聊轮次自动注入当前时间，给 agent 日常对话时间感（安全：本地判断、零网络、不落盘）",
   "type": "commonjs",
   "main": "index.js",
-  "files": ["index.js", "cordis.patch.yml"],
+  "files": ["index.js", "cordis.patch.yml", "package.json"],
   "license": "MIT",
-  "_comment": "安装：复制本目录到 DSH profile 的 node_modules/dsh-time-sense，并在 profile cordis.patch.yml 追加 ext/dsh-time-sense/cordis.patch.yml 的 insert 块"
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "_comment": "安装：dependencies 用 file: 指向本目录 + profile 的 dsh.profile.bundles 注册。bundle 校验要求 package.json 声明 dsh.bundle.patch"
 }
