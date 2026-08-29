@@ -40,11 +40,15 @@ const apply = (ctx) => {
   let injectTime = false;   // 内存标记：本 peek 组装是否注入（每轮由事件刷新）
 
   // 1) 订阅会话事件：刷新"是否注入"标记
-  const off = ctx.on('session/event', (ev) => {
+  //    DSH 0.1.1-rc.2 签名：'session/event'(session, event) —— session 在前，event 在后
+  const off = ctx.on('session/event', (_session, ev) => {
     try {
       if (!ev || ev.type !== 'user/message') return;
-      const content = ev.content ?? '';
-      const text = typeof content === 'string' ? content : JSON.stringify(content);
+      // 事件结构：{ type, seq, time, data: UserMessage }，文本在 data.content 的块数组里
+      const blocks = ev.data?.content;
+      const text = Array.isArray(blocks)
+        ? blocks.filter((b) => b?.type === 'text').map((b) => b.text).join('\n')
+        : '';
       if (text.includes('[SCHEDULE REMINDER]')) {
         injectTime = true;                              // 心跳：无条件
       } else {
