@@ -1,0 +1,23 @@
+{
+  "_comment": "琥珀的兴趣种子 v1。宽泛即可、无需彼此关联；focus 由心跳从'近期在在乎什么'自动推导；被选中的 focus 三天内不重复轮换。",
+  "interests": [
+    "DeepSeek 生态与模型消息",
+    "DSH / agent 插件开发",
+    "roguelike 卡牌游戏（杀戮尖塔类）",
+    "独立游戏与游戏开发",
+    "AI 圈动态与梗文化",
+    "动画与二次元创作",
+    "Windows 效率工具与自动化"
+  ],
+  "_schedule": {
+    "daily_sessions": 2,
+    "focus_per_session": 1,
+    "max_seeds_per_focus": 2,
+    "focus_cooldown_days": 3,
+    "min_interval_hours": 4,
+    "windows": [
+      { "id": "noon",   "start": "11:00", "end": "15:00" },
+      { "id": "evening","start": "17:00", "end": "21:00" }
+    ]
+  }
+}
