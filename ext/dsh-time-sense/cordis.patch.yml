@@ -1,0 +1,6 @@
+# dsh-time-sense 时间感知插件（琥珀的时间感）
+# 注入方式：把下方 insert 追加到 profile 的 cordis.patch.yml
+#   （或让 dsh-time-sense 作为 bundle 安装——见 ext/dsh-time-sense/package.json）
+- insert:
+    - id: dsh-time-sense
+      name: dsh-time-sense
