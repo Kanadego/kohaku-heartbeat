@@ -28,11 +28,13 @@ function loadBusyRules() {
 }
 
 /** 前台进程名 → 忙闲类别：busy | idle | unknown */
+const own = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
+
 function classifyProcess(procName, rules) {
   if (!procName) return 'unknown';
   const key = String(procName).toLowerCase().replace(/\.exe$/, '');
-  if (rules.busy && key in rules.busy) return 'busy';
-  if (rules.idle && key in rules.idle) return 'idle';
+  if (own(rules.busy, key)) return 'busy';
+  if (own(rules.idle, key)) return 'idle';
   return 'unknown';
 }
 

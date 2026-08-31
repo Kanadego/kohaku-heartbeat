@@ -13,6 +13,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import url from 'node:url';
 import { loadJson, saveJson } from '../lib/vault.mjs';
 import { repoRoot, dataHome } from '../lib/paths.mjs';
 
@@ -114,18 +115,27 @@ function sanitize(raw) {
 }
 
 /**
- * 网页搜索（v0.9.1 引入 Bing + Python 通道 + 临时文件交接）。
+ * 网页搜索（v0.9.2）。
  * 背景：① Node fetch 对 DuckDuckGo 等站 TLS 指纹握手超时、且 DDG Instant Answer
  *        API 对泛查询返回空，改用 Bing 搜索页（实测 Python 可抓、有真实结果）；
  *        ② 沙箱禁止 Node 捕获子进程 stdout（EPERM），必须以"临时文件交接"
  *        回传（同 lib/vault.mjs 方案）。
  * 流程：Python 抓 Bing 搜索页 -> 解析 h2 标题 -> 写临时文件 -> Node 读 -> 焚毁。
- * 返回：字符串数组（搜索结果标题/摘要片段），空数组 = 无结果或失败。
- * 兜底：Python 失败时返回空（不崩），由调用方按"无结果"处理。
+ * 返回：字符串数组（搜索结果标题）；空数组 = 无结果或失败（原因写 logs/browse.log）。
+ * 调试：--dry-run（见文末 CLI 入口）打印完整抓取链路。
  */
 import { spawnSync } from 'node:child_process';
 
-async function fetchSearch(query) {
+/** 追加浏览流日志（<dataHome>/logs/browse.log），失败原因可追溯 */
+function logBrowse(tag, msg) {
+  try {
+    fs.mkdirSync(path.join(HOME, 'logs'), { recursive: true });
+    fs.appendFileSync(path.join(HOME, 'logs', 'browse.log'),
+      `${new Date().toISOString()} [${tag}] ${msg}\n`, 'utf8');
+  } catch { /* 日志失败不阻塞 */ }
+}
+
+async function fetchSearch(query, dry = false) {
   const tmp = path.join(HOME, '.browse-bing.tmp');
   const q = encodeURIComponent(query);
   // mkt+setlang 地域参数必须带：裸 Bing 请求会被反爬污染成垃圾结果（实测返回 IRCTC/NAVER）
@@ -144,26 +154,41 @@ async function fetchSearch(query) {
     "  out = ['__ERROR__ ' + str(e)]\n" +
     "open(" + JSON.stringify(tmp) + ", 'w', encoding='utf-8').write(json.dumps(out, ensure_ascii=False))\n";
 
+  if (dry) console.log(`[browse:dry] url=${url}`);
   try {
     const r = spawnSync('py', ['-3', '-c', script], { stdio: 'ignore', timeout: 25000 });
-    const raw = (r.status === 0 && fs.existsSync(tmp))
+    if (r.status !== 0) {
+      const why = `python exit ${r.status}`;
+      logBrowse('fetch', `${query.slice(0, 40)}: ${why}`);
+      if (dry) console.log(`[browse:dry] FAIL ${why}`);
+      return [];
+    }
+    const raw = fs.existsSync(tmp)
       ? (() => { const s = fs.readFileSync(tmp, 'utf8'); fs.rmSync(tmp, { force: true }); return s; })()
       : '';
-    if (raw) {
-      const arr = JSON.parse(raw);
-      if (Array.isArray(arr) && arr.length && arr[0].startsWith('__ERROR__')) {
-        console.log(`[browse] bing py error: ${arr[0].slice(9, 140)}`);
-        return [];
-      }
-      return Array.isArray(arr) ? arr : [];
+    if (!raw) {
+      logBrowse('fetch', `${query.slice(0, 40)}: no output file`);
+      if (dry) console.log('[browse:dry] FAIL no output file');
+      return [];
     }
+    const arr = JSON.parse(raw);
+    if (Array.isArray(arr) && arr.length && arr[0].startsWith('__ERROR__')) {
+      const why = arr[0].slice(9);
+      logBrowse('fetch', `${query.slice(0, 40)}: ${why}`);
+      if (dry) console.log(`[browse:dry] FAIL ${why.slice(0, 160)}`);
+      return [];
+    }
+    if (dry) console.log(`[browse:dry] OK ${Array.isArray(arr) ? arr.length : 0} results`);
+    return Array.isArray(arr) ? arr : [];
   } catch (e) {
     fs.rmSync(tmp, { force: true });
+    logBrowse('fetch', `${query.slice(0, 40)}: ${e.message}`);
+    if (dry) console.log(`[browse:dry] EXC ${e.message}`);
+    return [];
   }
-  return [];
 }
 
-async function wanderOnce(state, now) {
+async function wanderOnce(state, now, opts = {}) {
   const c = cfg();
   const sc = c._schedule ?? {};
   const focus = pickFocus(state, now);
@@ -176,7 +201,7 @@ async function wanderOnce(state, now) {
   try {
     // 1) web 搜索：只取标题文本（不抓全页，减 surface 注入面）
     //    通道（v0.9.1）：Python + Bing 搜索页，临时文件交接回避沙箱 EPERM。
-    const hits = await fetchSearch(query);
+    const hits = await fetchSearch(query, opts?.dry);
     const seen = new Set();
     for (const h of hits) {
       if (items.length >= maxPerFocus) break;
@@ -207,29 +232,31 @@ async function wanderOnce(state, now) {
 }
 
 /** 自由闲逛调度：窗口 + 最低间隔双重检查 */
-async function collectWander(state, now) {
+async function collectWander(state, now, opts = {}) {
   const sc = cfg()._schedule ?? {};
   const windows = sc.windows ?? [];
   const minGap = (sc.min_interval_hours ?? 4) * 3600000;
   const win = inWindow(now, windows);
-  if (!win) return { items: [], skipped: `window(now=${now.toTimeString().slice(0,5)})` };
+  if (!win) { if (opts.dry) console.log(`[browse:dry] window gate: ${now.toTimeString().slice(0,5)} not in window`); return { items: [], skipped: `window(now=${now.toTimeString().slice(0,5)})` }; }
   const last = state.wander?.last_wander_at ?? 0;
   if (now.getTime() - last < minGap)
     return { items: [], skipped: 'min-interval' };
-  return await wanderOnce(state, now);
+  return await wanderOnce(state, now, opts);
 }
 
 // ── 总入口 ─────────────────────────────────────────────
-export default async function collect(_policy, now = new Date()) {
-  const state = loadJson(STATE_FILE) ?? { targets: {}, last_check_at: 0, wander: {} };
+export default async function collect(_policy, now = new Date(), opts = {}) {
+  const state = (opts.dry
+    ? { targets: {}, last_check_at: 0, wander: { focusHistory: {}, focusCount: {}, last_wander_at: 0 } }
+    : loadJson(STATE_FILE) ?? { targets: {}, last_check_at: 0, wander: {} });
 
-  // A. 定向追踪（6h 节流）
-  const targetRes = (now.getTime() - (state.last_check_at ?? 0)) >= MIN_INTERVAL_MS
+  // A. 定向追踪（6h 节流；dry 模式跳过——只看闲逛链路）
+  const targetRes = (!opts.dry && (now.getTime() - (state.last_check_at ?? 0)) >= MIN_INTERVAL_MS)
     ? await collectTargets(state, now)
     : { items: [], checked: 0, errors: [] };
 
   // B. 自由闲逛（窗口 + 4h 间隔）
-  const wanderRes = await collectWander(state, now);
+  const wanderRes = await collectWander(state, now, opts);
 
   const allItems = [...(targetRes.items ?? []), ...(wanderRes.items ?? [])];
   const changed = (targetRes.checked ?? 0) > 0 || (wanderRes.skipped ?? '').length > 0
@@ -246,4 +273,17 @@ export default async function collect(_policy, now = new Date()) {
         skipped: wanderRes.skipped ?? null },
     },
   };
+}
+
+// CLI：--dry-run 手动调试模式（不写状态、不打节流），打印完整抓取链路
+// 用法：node inputs/browse.mjs --dry-run ["查询词"]
+if (process.argv[1] && url.pathToFileURL(process.argv[1]).href === import.meta.url) {
+  const dry = process.argv.includes('--dry-run');
+  if (dry) {
+    const now = new Date();
+    now.setHours(12, 0, 0, 0);  // 强制进午间窗口（dry-run 只看链路）
+    const state = { targets: {}, last_check_at: 0, wander: { focusHistory: {}, focusCount: {}, last_wander_at: 0 } };
+    const res = await collect({}, now, { dry: true });
+    console.log(JSON.stringify(res, null, 2));
+  }
 }

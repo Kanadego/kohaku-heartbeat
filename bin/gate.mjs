@@ -13,15 +13,18 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { loadJson, saveJson } from '../lib/vault.mjs';
 import { repoRoot, dataHome } from '../lib/paths.mjs';
 
 const ROOT = repoRoot();
 const POLICY = JSON.parse(fs.readFileSync(path.join(ROOT, 'config', 'policy.json'), 'utf8'));
 const BUSY_RULES = path.join(ROOT, 'config', 'busy-rules.json');
+const FRONTWIN_PS1 = path.join(ROOT, 'inputs', 'frontwin.ps1');
 const HOME = dataHome();
 const SENT_FILE = path.join(HOME, 'sent.json');
 const CHAT_LOG = path.join(HOME, 'logs', 'active_chat_log.md');
+const STABLE_MS = 15000;  // 15s 稳定窗：快照过老不采信（v0.9.2）
 
 const readSent = () => {
   // 重读纪律：每次都从磁盘取最新（密文自动解密，明文兼容）
@@ -43,39 +46,70 @@ const inQuietHours = (d = new Date()) => {
   return start > end ? (mins >= start || mins < end) : (mins >= start && mins < end);
 };
 
-// ── v0.9 窗口类别探查（实时，开口前当场判定）──────────────────
-// 读 busy-rules.json 类别表 + screen.json 的最新前台窗口（进程/矩形/屏幕），
-// 判定逻辑：
-//   1. busy 类别表命中（办公/IDE/终端/会议）→ busy
-//   2. idle 类别表命中（浏览器/创作/资源管理器/全屏视频）→ idle
-//   3. 未知进程：矩形约等于屏幕 → 全屏游戏 → busy；否则 → idle
-// 15s 稳定窗由 caller 用 screen.json 的 captured_at 与当前时间差保证，
-// 超过 15s 的旧快照不采信（返回 unknown → 只依赖温度计兜底）。
+// ── v0.9.2 窗口类别探查（开口前实时判定）───────────────────
+// 实时性修复（tamako 评审 A）：原实现读 2h 心跳快照 screen.json，
+// 主人刚切窗口时会误判。现流程：
+//   1. 实时调 frontwin.ps1 轻量探针（秒级）→ 用实时数据分类；
+//   2. 探针失败时退回 screen.json 快照，但检查 captured_at 年龄
+//      （>15s 稳定窗视为过期 → unknown，由温度计兜底）。
+// 分类逻辑：busy 表优先 → idle 表 → 未知进程按全屏判定。
+const own = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
+
 function loadBusyRules() {
   try { return JSON.parse(fs.readFileSync(BUSY_RULES, 'utf8')); }
   catch { return { busy: {}, idle: {} }; }
 }
 
-function probeFrontWindowClass() {
+function classifyWindow(info, rules) {
+  if (!info || !info.process) return { cls: 'unknown', why: 'no-process' };
+  const key = String(info.process).toLowerCase().replace(/\.exe$/, '');
+  if (own(rules.busy, key)) return { cls: 'busy', why: key };
+  if (own(rules.idle, key)) return { cls: 'idle', why: key };
+  if (info.rect && info.screen) {
+    const [sw, sh] = info.screen;
+    const w = info.rect.right - info.rect.left;
+    const h = info.rect.bottom - info.rect.top;
+    if (sw > 0 && sh > 0 && w >= sw - 4 && h >= sh - 4)
+      return { cls: 'busy', why: `${key}:fullscreen` };
+  }
+  return { cls: 'idle', why: key };
+}
+
+/** 实时探针：跑 frontwin.ps1 拿当下前台窗口（秒级） */
+function probeFrontWindowLive() {
   try {
-    const rules = loadBusyRules();
+    const tmp = path.join(HOME, '.frontwin.tmp');
+    const r = spawnSync('powershell.exe',
+      ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', FRONTWIN_PS1, '-out', tmp],
+      { stdio: 'ignore', timeout: 10000 });
+    if (r.status !== 0 || !fs.existsSync(tmp)) return null;
+    const raw = fs.readFileSync(tmp, 'utf8');
+    fs.rmSync(tmp, { force: true });
+    return JSON.parse(raw);
+  } catch { return null; }
+}
+
+/** 兜底：screen.json 快照 + 年龄检查（>15s 不采信） */
+function probeFrontWindowSnapshot() {
+  try {
     const screen = loadJson(path.join(HOME, 'screen.json'));
-    if (!screen || !screen.process) return { cls: 'unknown', why: 'no-screen' };
-    const key = String(screen.process).toLowerCase().replace(/\.exe$/, '');
+    if (!screen || !screen.process) return { cls: 'unknown', why: 'no-screen', source: 'snapshot' };
+    const age = Date.now() - Date.parse(screen.captured_at || 0);
+    if (!Number.isFinite(age) || age > STABLE_MS)
+      return { cls: 'unknown', why: `snapshot-stale(${Math.round(age / 1000)}s)`, source: 'snapshot' };
+    const info = { process: screen.process, rect: screen.rect, screen: screen.screen };
+    return { ...classifyWindow(info, loadBusyRules()), source: 'snapshot' };
+  } catch { return { cls: 'unknown', why: 'err', source: 'snapshot' }; }
+}
 
-    if (rules.busy && key in rules.busy) return { cls: 'busy', why: key };
-    if (rules.idle && key in rules.idle) return { cls: 'idle', why: key };
-
-    // 未知进程：全屏判定（矩形≈屏幕 → 全屏游戏 → busy）
-    if (screen.rect && screen.screen) {
-      const [sw, sh] = screen.screen;
-      const w = screen.rect.right - screen.rect.left;
-      const h = screen.rect.bottom - screen.rect.top;
-      if (sw > 0 && sh > 0 && w >= sw - 4 && h >= sh - 4)  // 4px 容差（边框/缩放）
-        return { cls: 'busy', why: `${key}:fullscreen` };
-    }
-    return { cls: 'idle', why: key };
-  } catch { return { cls: 'unknown', why: 'err' }; }
+function probeFrontWindowClass() {
+  const rules = loadBusyRules();
+  const live = probeFrontWindowLive();
+  if (live) {
+    const c = classifyWindow(live, rules);
+    return { ...c, source: 'live' };
+  }
+  return probeFrontWindowSnapshot();  // 实时失败 → 快照 + 年龄检查
 }
 
 function pick() {

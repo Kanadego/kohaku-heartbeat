@@ -2,16 +2,19 @@
 # 用法：
 #   vault.ps1 protect   -in <plain>  -out <enc>   明文 -> 密文(KHBV1 头 + DPAPI blob)
 #   vault.ps1 unprotect -in <enc>    -out <plain> 密文 -> 明文
-#   vault.ps1 burn      -home <dir>  -yes        一键焚毁(覆写x3后删除)
+#   vault.ps1 burn      -home <dir> [-list <file>] -yes   一键焚毁(覆写x3后删除)
 #
 # 安全模型：CurrentUser 作用域 = 本 Windows 账户内自主可用，
 # 其他账户/其他机器不可解。防他人不防同账户恶意软件（DESIGN.md §7）。
+# 焚毁清单：优先从 -list 文件读（一行一条绝对路径，由 burn.mjs 依
+# lib/burn-list.mjs 单源生成）；无 -list 时退回内置清单（兼容直接调用）。
 
 param(
     [Parameter(Position = 0)][string]$Action,
     [string]$in,
     [string]$out,
     [string]$homeDir,
+    [string]$list,
     [switch]$yes
 )
 
@@ -42,12 +45,18 @@ function Unprotect-File([string]$InFile, [string]$OutFile) {
 }
 
 function Invoke-Burn([string]$HomeDir) {
-    # 焚毁清单：数据与密钥材料，覆写三次随机字节后删除
-    $targets = @(
-        "$HomeDir\seeds.json", "$HomeDir\sent.json", "$HomeDir\ledger.md",
-        "$HomeDir\logs\heartbeat.jsonl", "$HomeDir\logs\active_chat_log.md",
-        "$HomeDir\drafts", "$HomeDir\profiles"
-    )
+    # 焚毁清单：优先 -list 文件（单源，由 burn.mjs 依 lib/burn-list.mjs 生成）；
+    # 无 -list 时退回内置清单（兼容直接调用 vault.ps1 burn）。
+    $targets = @()
+    if ($list -and (Test-Path $list)) {
+        $targets = Get-Content $list | Where-Object { $_.Trim() } | ForEach-Object { $_.Trim() }
+    } else {
+        $targets = @(
+            "$HomeDir\seeds.json", "$HomeDir\sent.json", "$HomeDir\ledger.md",
+            "$HomeDir\logs\heartbeat.jsonl", "$HomeDir\logs\active_chat_log.md",
+            "$HomeDir\drafts", "$HomeDir\profiles"
+        )
+    }
     foreach ($t in $targets) {
         if (Test-Path $t -PathType Leaf) {
             $len = (Get-Item $t).Length
@@ -71,5 +80,5 @@ switch ($Action) {
     'unprotect' { Unprotect-File $in $out; Write-Output "UNPROTECTED: $out" }
     'burn'      { if (-not $yes) { Write-Output "REFUSED: add -yes to confirm irreversible burn"; exit 1 }
                   Invoke-Burn $homeDir }
-    default     { Write-Output "usage: vault.ps1 protect|unprotect -in <f> -out <f> | burn -home <dir> -yes" }
+    default     { Write-Output "usage: vault.ps1 protect|unprotect -in [file] -out [file] | burn -home [dir] -yes" }
 }
