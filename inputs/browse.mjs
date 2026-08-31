@@ -279,11 +279,16 @@ export default async function collect(_policy, now = new Date(), opts = {}) {
 // 用法：node inputs/browse.mjs --dry-run ["查询词"]
 if (process.argv[1] && url.pathToFileURL(process.argv[1]).href === import.meta.url) {
   const dry = process.argv.includes('--dry-run');
+  // 默认入口（v0.9.4）：执行一次完整收集并打印 context——
+  // SOP 第 2 步的 `node browse.mjs` 依赖此路径真正调用 collect。
+  const now = new Date();
   if (dry) {
-    const now = new Date();
     now.setHours(12, 0, 0, 0);  // 强制进午间窗口（dry-run 只看链路）
     const state = { targets: {}, last_check_at: 0, wander: { focusHistory: {}, focusCount: {}, last_wander_at: 0 } };
     const res = await collect({}, now, { dry: true });
     console.log(JSON.stringify(res, null, 2));
+  } else {
+    const res = await collect({}, now);
+    console.log(JSON.stringify(res.context));
   }
 }

@@ -185,7 +185,7 @@ config/
 | 屏幕脉搏 | `screenpulse.ps1` + `.mjs` | `GetForegroundWindow` → 标题/进程/矩形；`GetGUIThreadInfo` → 焦点；`EnumWindows` → 可见窗口（≤20）；截图降采样 1024 宽 | 无（固定逻辑）|
 | 空闲判定 | `idle.ps1` + `envpulse.mjs` | 键鼠空闲秒数 + 前台窗口类别 → presence | `config/busy-rules.json` |
 | 浏览·定向追踪 | `browse.mjs` + Node fetch | 查 npm/GitHub 最新版本，变化才提示（6h 节流）| `config/watchlist.json` |
-| 浏览·自由闲逛 | `browse.mjs` + **Python（`py -3`）** | 窗口内推 focus → Python urllib 抓 Bing（带 `mkt=zh-CN`/`setlang=zh-hans`）→ 解析标题 → 临时文件交接回 Node | `config/interests.json` |
+| 浏览·自由闲逛 | `browse.mjs` + **Python（`py -3`）** | 窗口内推 focus → Python urllib 抓 Bing（带 `mkt=zh-CN`/`setlang=zh-hans`）→ 解析标题 → 临时文件交接回 Node；**由 SOP 第 2 步触发**（窗口外自动跳过）| `config/interests.json` |
 | 素材池 | `seeds.mjs` + `vault.mjs` | DPAPI 密文；TTL/计数/容量 | `config/policy.json`（seed_*）|
 | 分寸闸门 | `gate.mjs` + `envpulse.json` + `screen.json` | pick 时实时探查窗口类别 → SILENT 或放行 | `config/policy.json` |
 | 通知推送 | `notify.ps1` | AUMID 注册 + toast；只在真开口时推 | 无（固定逻辑）|

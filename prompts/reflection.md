@@ -27,12 +27,18 @@ node <repo>/bin/log.mjs clean
 ```
 node <repo>/inputs/envpulse.mjs
 node <repo>/inputs/screenpulse.mjs
+node <repo>/inputs/browse.mjs
 node <repo>/bin/seeds.mjs list
 node <repo>/bin/gate.mjs status
 读 <data>/ledger.md（账本）
 ```
 
 第一条会刷新温度计快照并打印在场状态/时段/星期，以打印值为准。
+
+浏览流（v0.9.4 补回收集清单）：`browse.mjs` 内含窗口调度（午间 11-15 / 傍晚 17-21）
+与最短间隔（≥4h）双重检查——不在窗口内会自动跳过返回空，安全；窗口内则推 focus
+闲逛、把新发现写进素材池（source=浏览）。**此命令是浏览流唯一的触发点，必须保留**，
+否则自由闲逛永不产粮（曾因漏加导致多日零浏览素材）。
 
 屏幕脉冲（v0.4）会加密落盘 `<data>/screen.json`（前台标题/进程）与 `screen.jpg`（截图）。
 **仅当需要判断"他在干什么/心情如何"时才解锁查看**（用时解锁、用完即焚）：
