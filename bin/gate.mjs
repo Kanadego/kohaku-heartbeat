@@ -18,6 +18,7 @@ import { repoRoot, dataHome } from '../lib/paths.mjs';
 
 const ROOT = repoRoot();
 const POLICY = JSON.parse(fs.readFileSync(path.join(ROOT, 'config', 'policy.json'), 'utf8'));
+const BUSY_RULES = path.join(ROOT, 'config', 'busy-rules.json');
 const HOME = dataHome();
 const SENT_FILE = path.join(HOME, 'sent.json');
 const CHAT_LOG = path.join(HOME, 'logs', 'active_chat_log.md');
@@ -42,6 +43,41 @@ const inQuietHours = (d = new Date()) => {
   return start > end ? (mins >= start || mins < end) : (mins >= start && mins < end);
 };
 
+// ── v0.9 窗口类别探查（实时，开口前当场判定）──────────────────
+// 读 busy-rules.json 类别表 + screen.json 的最新前台窗口（进程/矩形/屏幕），
+// 判定逻辑：
+//   1. busy 类别表命中（办公/IDE/终端/会议）→ busy
+//   2. idle 类别表命中（浏览器/创作/资源管理器/全屏视频）→ idle
+//   3. 未知进程：矩形约等于屏幕 → 全屏游戏 → busy；否则 → idle
+// 15s 稳定窗由 caller 用 screen.json 的 captured_at 与当前时间差保证，
+// 超过 15s 的旧快照不采信（返回 unknown → 只依赖温度计兜底）。
+function loadBusyRules() {
+  try { return JSON.parse(fs.readFileSync(BUSY_RULES, 'utf8')); }
+  catch { return { busy: {}, idle: {} }; }
+}
+
+function probeFrontWindowClass() {
+  try {
+    const rules = loadBusyRules();
+    const screen = loadJson(path.join(HOME, 'screen.json'));
+    if (!screen || !screen.process) return { cls: 'unknown', why: 'no-screen' };
+    const key = String(screen.process).toLowerCase().replace(/\.exe$/, '');
+
+    if (rules.busy && key in rules.busy) return { cls: 'busy', why: key };
+    if (rules.idle && key in rules.idle) return { cls: 'idle', why: key };
+
+    // 未知进程：全屏判定（矩形≈屏幕 → 全屏游戏 → busy）
+    if (screen.rect && screen.screen) {
+      const [sw, sh] = screen.screen;
+      const w = screen.rect.right - screen.rect.left;
+      const h = screen.rect.bottom - screen.rect.top;
+      if (sw > 0 && sh > 0 && w >= sw - 4 && h >= sh - 4)  // 4px 容差（边框/缩放）
+        return { cls: 'busy', why: `${key}:fullscreen` };
+    }
+    return { cls: 'idle', why: key };
+  } catch { return { cls: 'unknown', why: 'err' }; }
+}
+
 function pick() {
   // 重读纪律：每次判定都从磁盘取最新
   const sent = readSent();
@@ -49,7 +85,12 @@ function pick() {
 
   if (inQuietHours(now)) return console.log('SILENT: quiet hours');
 
-  // 温度计联动(v0.3)：主人密集操作中 -> 勿扰
+  // v0.9 窗口类别探查（实时）：busy 类 → 勿扰
+  const fw = probeFrontWindowClass();
+  if (fw.cls === 'busy')
+    return console.log(`SILENT: busy window (${fw.why})`);
+
+  // 温度计联动（快照兜底）：主人离散输入中 -> 勿扰
   try {
     const env = loadJson(path.join(HOME, 'envpulse.json'));
     if (env && env.presence === 'active')
@@ -65,7 +106,7 @@ function pick() {
       return console.log(`SILENT: cooldown ${Math.ceil(leftMs / 60000)}min left`);
   }
   console.log(JSON.stringify({ ok: true, sent_today: sent.items.length,
-    cap: POLICY.max_daily_send }));
+    cap: POLICY.max_daily_send, window: fw }));
 }
 
 function confirm(kind, summary) {

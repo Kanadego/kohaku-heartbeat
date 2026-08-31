@@ -113,6 +113,56 @@ function sanitize(raw) {
             .slice(0, 500);
 }
 
+/**
+ * 网页搜索（v0.9.1 引入 Bing + Python 通道 + 临时文件交接）。
+ * 背景：① Node fetch 对 DuckDuckGo 等站 TLS 指纹握手超时、且 DDG Instant Answer
+ *        API 对泛查询返回空，改用 Bing 搜索页（实测 Python 可抓、有真实结果）；
+ *        ② 沙箱禁止 Node 捕获子进程 stdout（EPERM），必须以"临时文件交接"
+ *        回传（同 lib/vault.mjs 方案）。
+ * 流程：Python 抓 Bing 搜索页 -> 解析 h2 标题 -> 写临时文件 -> Node 读 -> 焚毁。
+ * 返回：字符串数组（搜索结果标题/摘要片段），空数组 = 无结果或失败。
+ * 兜底：Python 失败时返回空（不崩），由调用方按"无结果"处理。
+ */
+import { spawnSync } from 'node:child_process';
+
+async function fetchSearch(query) {
+  const tmp = path.join(HOME, '.browse-bing.tmp');
+  const q = encodeURIComponent(query);
+  // mkt+setlang 地域参数必须带：裸 Bing 请求会被反爬污染成垃圾结果（实测返回 IRCTC/NAVER）
+  const url = `https://www.bing.com/search?q=${q}&mkt=zh-CN&setlang=zh-hans&count=10`;
+  const script =
+    "import urllib.request, re, json\n" +
+    "out = []\n" +
+    "try:\n" +
+    "  req = urllib.request.Request(" + JSON.stringify(url) +
+    ", headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36'})\n" +
+    "  html = urllib.request.urlopen(req, timeout=15).read().decode('utf-8', 'ignore')\n" +
+    "  for m in re.findall(r'<h2[^>]*>.*?<a[^>]*>(.*?)</a>', html, re.S)[:10]:\n" +
+    "    t = re.sub(r'<[^>]+>', '', m).strip()\n" +
+    "    if t and t not in out: out.append(t)\n" +
+    "except Exception as e:\n" +
+    "  out = ['__ERROR__ ' + str(e)]\n" +
+    "open(" + JSON.stringify(tmp) + ", 'w', encoding='utf-8').write(json.dumps(out, ensure_ascii=False))\n";
+
+  try {
+    const r = spawnSync('py', ['-3', '-c', script], { stdio: 'ignore', timeout: 25000 });
+    const raw = (r.status === 0 && fs.existsSync(tmp))
+      ? (() => { const s = fs.readFileSync(tmp, 'utf8'); fs.rmSync(tmp, { force: true }); return s; })()
+      : '';
+    if (raw) {
+      const arr = JSON.parse(raw);
+      if (Array.isArray(arr) && arr.length && arr[0].startsWith('__ERROR__')) {
+        console.log(`[browse] bing py error: ${arr[0].slice(9, 140)}`);
+        return [];
+      }
+      return Array.isArray(arr) ? arr : [];
+    }
+  } catch (e) {
+    fs.rmSync(tmp, { force: true });
+  }
+  return [];
+}
+
 async function wanderOnce(state, now) {
   const c = cfg();
   const sc = c._schedule ?? {};
@@ -121,19 +171,12 @@ async function wanderOnce(state, now) {
 
   const maxPerFocus = sc.max_seeds_per_focus ?? 2;
   const items = [];
-  const query = `${focus} 最新动态/讨论/新闻`;
+  // 查询词：明确关键词组合（搜索引擎对长白话查询理解差，实测"X 最新动态/讨论/新闻"会跑偏）
+  const query = `${focus} 2026 最新`;
   try {
-    // 1) web 搜索：只取标题+摘要文本（不抓全页，减 surface 注入面）
-    const url = 'https://api.duckduckgo.com/?q=' + encodeURIComponent(query) +
-                '&format=json&no_html=1&skip_disambig=1';
-    const r = await fetch(url, { headers: UA });
-    if (!r.ok) throw new Error(`ddg ${r.status}`);
-    const j = await r.json();
-    const hits = [
-      ...((j.RelatedTopics ?? []).map(r2 => r2.Text)).filter(Boolean),
-      ...((j.RelatedTopics ?? []).flatMap(r2 =>
-        (r2.Topics ?? []).map(t => t.Text)).filter(Boolean)),
-    ];
+    // 1) web 搜索：只取标题文本（不抓全页，减 surface 注入面）
+    //    通道（v0.9.1）：Python + Bing 搜索页，临时文件交接回避沙箱 EPERM。
+    const hits = await fetchSearch(query);
     const seen = new Set();
     for (const h of hits) {
       if (items.length >= maxPerFocus) break;

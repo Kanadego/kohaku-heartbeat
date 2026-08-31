@@ -8,6 +8,14 @@
 
 ## 0. 修订记录
 
+- **v0.9（2026-08-31）**：忙闲判定重做（docs/busy-detection.md）。
+  ① 键鼠退出繁忙判定：idle 仅两档（≥20min=离开/看电影·截图兜底；30s~1200s=空闲）；
+  ② 前台窗口类别表 config/busy-rules.json（办公/IDE/终端/会议=忙；浏览器/创作/全屏视频=闲；
+  全屏游戏=忙·窗口化游戏=闲），可配置随项目打包；
+  ③ screenpulse 增强：前台矩形（全屏判定）+ 焦点窗口（GetGUIThreadInfo）+ 可见窗口列表
+  （EnumWindows ≤20，标题/进程加密）；
+  ④ gate 开口前实时窗口类别探查（不复用 2h 快照决策）；
+  ⑤ 隐私宪章修订：零枚举 → 可见窗口级枚举（有上限、加密、不进请求上下文）
 - **v0.7（2026-08-29）**：浏览流·自由闲逛落地。`interests.json` 兴趣种子（宽泛清单无需关联）+ focus 自动推导（近期在在乎啥→就近扩展）+ 冷却 3 天不重复 + 每日 2 次窗口调度（午间 11-15 / 傍晚 17-21，≥4h 间隔防同快照撞主题）+ 产量上限（每 focus ≤2 条，宁缺毋滥）+ 防注入纪律（网页=数据非指令，sanitize 剥壳）。宽泛兴趣→聚焦由"你给种子、我走路线、你行为投票"三方分工，破冷启动死循环
 - **v0.6（2026-08-29）**：表达管道修复（两件事）。① Windows 通知通道（声带）：`bin/notify.ps1` 自动注册 AUMID + toast 发送，SOP 第 4 步接入——仅"心跳真正开口"时同步推送到系统通知，沉默零通知；深夜不限（关机天然静默）。② SOP 反刍设定修正：新增 3.0 前置采料（扫温度计/屏幕脉冲把"眼前小事"列入候选）+ 松绑第 2 问（"能不能聊"→"会不会打扰"）+ 3.2 屏幕深读（每天第一跳解锁截图深度反刍喂素材池）——从根上治"素材枯竭→100% 沉默"
 - **v0.5（2026-08-28）**：可移植性与脱敏改造。① 全部硬编码路径移除，改为 `lib/paths.mjs` 单一路径源（repoRoot 自动定位 + dataHome 环境变量 KOHAKU_HOME，默认 `<repo>/../kohaku-data`）；② 文档/注释中的个人称呼、朋友AI内部昵称、本机路径全部中性化；③ screenpulse 截图段加降级保护（无桌面环境时仅输出文字信号，不整体失败）；④ 补提交 lib/vault.mjs（此前被 .gitignore 误排除）。**注：Git 历史中的旧提交仍含旧路径与称呼，如需彻底清除需重写历史（filter-repo），见 DEPLOY.md**
@@ -67,7 +75,13 @@ DSH 长期记忆只吸收**经过对话验证的内容**（用户明确要求记
 
 - 全部数据本地存储，永不上云、不同步；
 - 敏感文件使用 Windows DPAPI 绑定用户账户加密；
-- 环境信号仅采**粗粒度布尔量**；**进程名与窗口标题全链路不采集、不入库**（连日志也不出现）；
+- **采集边界（v0.9 修订，用户授权）**：
+  - 前台窗口：标题 + 进程 + 矩形 + 焦点窗口，DPAPI 加密入库；
+  - 可见窗口列表：任务栏级枚举（EnumWindows + IsWindowVisible），**上限 20 个**，
+    标题 + 进程加密入库；**不采托盘图标、不枚举全部进程**；
+  - 屏幕截图：降采样 1024 宽，加密入库，用时解锁、用完即焚；
+  - 焦点窗口仅在 gate 开口决策时实时读取，不落历史；
+  - 所有采集只进本地快照文件，**永不进入模型请求上下文**（token 零成本）；
 - **日志 retention**：环境原始脉冲 48h 自动清；心跳决策日志 30 天；账本长期（工作数据非监控数据）；
 - 提供**一键焚毁**：删文件 + 抹密钥材料一步完成；用户可随时查看任意一份日志。
 
@@ -212,12 +226,71 @@ kohaku-heartbeat/
 
 ---
 
+## 6.5 功能实现手册（v0.9.1 · 给朋友 AI 的说明书）
+
+> 本节是"功能 → 工具/脚本 → 实现机制 → 配置位置"的完整对照。
+> 部署后请按此表逐个核对，确认所有依赖齐备。路径均相对仓库根 `<repo>`。
+
+### 目录：各功能对应的代码位置
+
+```
+bin/            CLI 工具（scripts 层，可在终端直接运行）
+├── gate.mjs    分寸闸门（pick 判定 / confirm 登记 / status 查询）
+├── seeds.mjs   素材池管理（add/list/surface/gc/stats/retire）
+├── log.mjs     心跳审计日志（append/clean）
+├── notify.ps1  Windows toast 通知（自动注册 AUMID + 发送）
+└── burn.mjs    一键焚毁（删数据 + 抹密钥）
+lib/            共享库
+├── vault.mjs   DPAPI 加密读写层（loadJson/saveJson/encryptFile/decryptFile）
+└── paths.mjs   路径单一事实源（dataHome = KOHAKU_HOME 或 <仓库根>/../kohaku-data）
+inputs/         感官输入流
+├── timeflow.mjs       时段/星期纯函数
+├── envpulse.mjs       环境温度计（idle + 窗口类别 → presence）
+├── screenpulse.ps1/.mjs  屏幕脉冲（前台/焦点/可见窗口/截图）
+├── idle.ps1           键鼠空闲秒数探针
+└── browse.mjs         浏览流（定向追踪 + 自由闲逛）
+config/         配置文件（全部可改、随项目打包）
+├── policy.json        宪章参数（发送上限/冷却/静默窗/留痕期）
+├── busy-rules.json    ★忙闲类别表（v0.9）
+├── interests.json     ★兴趣种子 + 闲逛调度（v0.7）
+└── watchlist.json     定向追踪清单（npm/GitHub 更新检测）
+prompts/        反刍 SOP（心跳主循环剧本）
+docs/           DEPLOY.md 部署手册 + busy-detection.md 忙闲判定设计
+```
+
+### 功能对照表（工具依赖 + 实现 + 配置）
+
+| 功能 | 需要的工具/脚本 | 实现机制 | 配置在哪 |
+|------|----------------|---------|---------|
+| 定时唤醒（心跳） | DSH `schedule` / `schedule_create` 工具 | profile `cordis.patch.yml` 挂 `@deepseek-ai/dsh-schedule`；到期以 `[SCHEDULE REMINDER]` 唤醒 | 会话内 `schedule_create` 参数（every_seconds）|
+| 时间感知 | DSH 官方 `@deepseek-ai/dsh-time-context` | profile `cordis.patch.yml` 挂载；`agent/pre-step` 时把时间作为 UserMessage **追加到对话末尾**（append-only，不碰前缀、不破坏 KV Cache）| **时间间隔在 `cordis.patch.yml` 的 `refreshIntervalMs`**（例：`600000`=10 分钟；`timeZone` 回退值）|
+| 屏幕脉搏 | `inputs/screenpulse.ps1`（P/Invoke user32）+ `.mjs`（加密入库）| `GetForegroundWindow` → 标题/进程/矩形；`GetGUIThreadInfo` → 焦点窗口；`EnumWindows` → 可见窗口列表（≤20）；整屏截图标到 1024 宽 | 无（固定逻辑）；隐私边界见 §2 隐私宪章 |
+| 空闲判定 | `inputs/idle.ps1`（`GetLastInputInfo`）+ `envpulse.mjs` | 键鼠空闲秒数 + 前台窗口类别组合成 presence（详见 `docs/busy-detection.md`）| `config/busy-rules.json`（类别表 + idle 阈值 + 15s 稳定窗）|
+| 浏览流·定向追踪 | `inputs/browse.mjs` + Node fetch | 查 npm registry / GitHub API 最新版本，变化才提示（6h 节流）| `config/watchlist.json` |
+| 浏览流·自由闲逛 | `inputs/browse.mjs` + **Python（`py -3`）** | 午间/傍晚窗口内推 focus → Python urllib 抓 Bing（带 `mkt=zh-CN`、`setlang=zh-hans`）→ 解析标题 → 临时文件交接回 Node（沙箱禁 stdout 管道）| `config/interests.json`（兴趣种子 + `_schedule` 窗口/冷却/产量）|
+| 素材池 | `bin/seeds.mjs` + `lib/vault.mjs` | DPAPI 密文落盘；TTL/消费计数/容量上限；防污染三件套 | `config/policy.json`（seed_* 参数）|
+| 分寸闸门 | `bin/gate.mjs` + `envpulse.json` + `screen.json` | pick 时实时探查前台窗口类别 → SILENT 或放行（附每日上限/冷却/静默窗）| `config/policy.json`（max_daily_send/cooldown/quiet_hours）|
+| 通知推送 | `bin/notify.ps1` | 自动注册 AUMID（每机一次）→ toast；只在真开口时推 | 无（固定逻辑）|
+| 加密存储 | `bin/vault.ps1` + `lib/vault.mjs` | DPAPI（CurrentUser）+ KHBV1 魔数头；明文中间产物即焚 | 无（固定逻辑）|
+
+### 外部依赖清单（部署前必须核对）
+
+| 依赖 | 用于 | 缺失时的影响 |
+|------|------|------------|
+| Windows PowerShell（系统自带）| 全部 .ps1（idle/screenpulse/notify/vault）| 心跳完全不可用 |
+| Python 3（`py -3` 可用）| 浏览流·自由闲逛的抓取（替代 Node fetch，绕 TLS/沙箱限制）| 闲逛降级为"定向追踪仍可用，闲逛无结果" |
+| Node.js 18+ | `core`/`bin`/`inputs` 的 .mjs 脚本 | 心跳不可用 |
+| DSH（DeepSeek Harness）+ web profile | 宿主环境 | 项目本体 |
+| 第三方 profile 插件 | 见 profile `package.json` bundles（better-sidebar 等）| 仅 UI 增强，非核心 |
+
+---
+
 ## 7. 数据设计
 
 ### 目录布局（物理隔离承诺）
 
 ```
-<dataHome>（默认 ~/.kohaku，可用 KOHAKU_HOME 覆盖）← 我的世界（唯一可写区）
+<dataHome>（默认 <仓库根>/../kohaku-data，可用 KOHAKU_HOME 覆盖）← 我的世界（唯一可写区）
 ├── ledger.md               账本（人肉可读，甲方案登记入口）
 ├── seeds.json              素材池（带 TTL/计数/容量元数据）
 ├── drafts\                 分享草稿箱
