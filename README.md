@@ -72,6 +72,7 @@ test/          单元测试
 - [docs/DEPLOY.md](docs/DEPLOY.md) — 部署手册（从零跑起）
 - [docs/busy-detection.md](docs/busy-detection.md) — 忙闲判定设计（v0.9）
 - **给朋友 AI 的第一步**：读 DESIGN.md §6.5「功能实现手册」——功能 → 工具 → 实现 → 配置位置完整对照表
+- **排查问题第一步**：`node bin/diag.mjs` —— 环境/宿主/数据/网络/卫生一键体检，定位问题在哪一层
 
 ## 致谢
 

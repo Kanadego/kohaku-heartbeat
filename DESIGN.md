@@ -158,6 +158,7 @@ bin/
 ├── seeds.mjs   素材池管理（add/list/surface/gc/stats/retire）
 ├── log.mjs     心跳审计日志（append/clean）
 ├── notify.ps1  Windows toast 通知（自动注册 AUMID + 发送）
+├── diag.mjs    诊断体检单（node bin/diag.mjs：环境/宿主/数据/网络/卫生一键体检）
 └── burn.mjs    一键焚毁（删数据 + 抹密钥）
 lib/
 ├── vault.mjs   DPAPI 加密读写层（loadJson/saveJson/encryptFile/decryptFile）
@@ -189,6 +190,8 @@ config/
 | 分寸闸门 | `gate.mjs` + `envpulse.json` + `screen.json` | pick 时实时探查窗口类别 → SILENT 或放行 | `config/policy.json` |
 | 通知推送 | `notify.ps1` | AUMID 注册 + toast；只在真开口时推 | 无（固定逻辑）|
 | 加密存储 | `vault.ps1` + `vault.mjs` | DPAPI（CurrentUser）+ KHBV1 头；明文即焚 | 无（固定逻辑）|
+| 诊断体检 | `diag.mjs` | 一键汇总环境/宿主/数据/网络/卫生 → PASS/FAIL 体检单 | 无参数 |
+| 抓取调试 | `browse.mjs --dry-run` | 打印完整抓取链路（URL/结果/错误）| — |
 
 ### 外部依赖清单
 
