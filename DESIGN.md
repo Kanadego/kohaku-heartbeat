@@ -111,7 +111,7 @@ kohaku-heartbeat/
 | 🕐 时间流 | 星期/时段/公历节日（纯时间函数）| ✅ v0.3 |
 | 🌡️ 环境温度计 | 键鼠空闲秒数 + 前台窗口类别 → presence | ✅ v0.3 / v0.9 重做 |
 | 🌐 兴趣浏览流·定向追踪 | watchlist 监控 npm/GitHub 更新 | ✅ v0.3 |
-| 🌐 兴趣浏览流·自由闲逛 | interests 种子 + focus 推导 + 窗口调度 | ✅ v0.7 / v0.9.1 修通道 |
+| 🌐 兴趣浏览流·自由闲逛 | interests 种子 + focus 推导 + 窗口调度 | ✅ v0.7 / v0.9.1 修通道 / **v0.9.5 改官方搜索** |
 | 🖥️ 屏幕脉搏 | 前台/焦点/可见窗口 + 截图 | ✅ v0.4 / v0.9 增强 |
 
 ### 话题种子账本：对话内主动登记（采用）
@@ -168,7 +168,7 @@ inputs/
 ├── envpulse.mjs       环境温度计（idle + 窗口类别 → presence）
 ├── screenpulse.ps1/.mjs  屏幕脉冲（前台/焦点/可见窗口/截图）
 ├── idle.ps1           键鼠空闲秒数探针
-└── browse.mjs         浏览流（定向追踪 + 自由闲逛）
+└── browse.mjs         浏览流（定向追踪 + 闲逛调度咨询）
 config/
 ├── policy.json        宪章参数（发送上限/冷却/静默窗/留痕期）
 ├── busy-rules.json    ★忙闲类别表（v0.9）
@@ -185,21 +185,21 @@ config/
 | 屏幕脉搏 | `screenpulse.ps1` + `.mjs` | `GetForegroundWindow` → 标题/进程/矩形；`GetGUIThreadInfo` → 焦点；`EnumWindows` → 可见窗口（≤20）；截图降采样 1024 宽 | 无（固定逻辑）|
 | 空闲判定 | `idle.ps1` + `envpulse.mjs` | 键鼠空闲秒数 + 前台窗口类别 → presence | `config/busy-rules.json` |
 | 浏览·定向追踪 | `browse.mjs` + Node fetch | 查 npm/GitHub 最新版本，变化才提示（6h 节流）| `config/watchlist.json` |
-| 浏览·自由闲逛 | `browse.mjs` + **Python（`py -3`）** | 窗口内推 focus → Python urllib 抓 Bing（带 `mkt=zh-CN`/`setlang=zh-hans`）→ 解析标题 → 临时文件交接回 Node；**由 SOP 第 2 步触发**（窗口外自动跳过）| `config/interests.json` |
+| 浏览·自由闲逛 | `browse.mjs`（调度咨询）+ **agent 的 `web_search` 工具**（v0.9.5）| browse.mjs 只做窗口/间隔/focus 冷却裁决，输出 advice+query；agent 用 DSH 官方 `web_search`（标准接口、provider 可插拔，Exa 或默认）实际搜索 → `seeds.mjs add` 入素材池 → `browse.mjs done` 登记冷却；**由 SOP 第 2 步触发**（窗口外自动跳过）| `config/interests.json` |
 | 素材池 | `seeds.mjs` + `vault.mjs` | DPAPI 密文；TTL/计数/容量 | `config/policy.json`（seed_*）|
 | 分寸闸门 | `gate.mjs` + `envpulse.json` + `screen.json` | pick 时实时探查窗口类别 → SILENT 或放行 | `config/policy.json` |
 | 通知推送 | `notify.ps1` | AUMID 注册 + toast；只在真开口时推 | 无（固定逻辑）|
 | 加密存储 | `vault.ps1` + `vault.mjs` | DPAPI（CurrentUser）+ KHBV1 头；明文即焚 | 无（固定逻辑）|
 | 诊断体检 | `diag.mjs` | 一键汇总环境/宿主/数据/网络/卫生 → PASS/FAIL 体检单 | 无参数 |
-| 抓取调试 | `browse.mjs --dry-run` | 打印完整抓取链路（URL/结果/错误）| — |
+| 抓取调试 | `browse.mjs --dry-run` | 打印调度裁决链路（窗口/间隔/focus 建议/查询词）| — |
 
 ### 外部依赖清单
 
 | 依赖 | 用于 | 缺失时的影响 |
 |------|------|------------|
 | Windows PowerShell（系统自带）| 全部 .ps1（idle/screenpulse/notify/vault）| 心跳完全不可用 |
-| Python 3（`py -3`）| 浏览流·闲逛抓取（绕 Node fetch 的 TLS/沙箱限制）| 闲逛无结果，定向追踪仍可用 |
 | Node.js 18+ | bin/inputs 的 .mjs 脚本 | 心跳不可用 |
+| DSH + web profile | 宿主环境；**`web_search` 工具（标准接口）供浏览流闲逛** | 项目本体；缺 web_search 则闲逛降级为无 |
 | DSH + web profile | 宿主环境 | 项目本体 |
 | 第三方 profile 插件 | 见 profile bundles | 仅 UI 增强，非核心 |
 
@@ -255,6 +255,10 @@ config/
 | v0.8 | 时间感知切官方 time-context（KV Cache 安全）|
 | v0.9 | 忙闲判定重做（键鼠退出 + 窗口类别）|
 | v0.9.1 | 浏览流通道修复 + 功能实现手册 |
+| v0.9.2 | tamako 评审修复（实时窗口探查/抓取调试/三隐患）|
+| v0.9.3 | diag 诊断体检单 |
+| v0.9.4 | 浏览流触发点补全（SOP 收集清单 + CLI 默认入口）|
+| v0.9.5 | 浏览流闲逛改官方 `web_search`（Python+Bing 退役）；调度咨询制 |
 
 ### 路线
 

@@ -1,9 +1,13 @@
-// 琥珀的心跳 · 兴趣浏览流（定向追踪 + 自由闲逛）
+// 琥珀的心跳 · 兴趣浏览流 v0.9.5（0901 重构）
 // 职责：
-//   A. 定向追踪（watchlist）：npm 包版本 / GitHub releases 更新检测
-//   B. 自由闲逛（interests）：从兴趣种子推导 focus，web_search 探索
-//      "主人近期在乎什么" → 就近扩展，带回候选素材
-// 纪律（v0.7 与木偶人敲定）：
+//   A. 定向追踪（watchlist）：npm 包版本 / GitHub releases 更新检测（保留原逻辑）
+//   B. 闲逛调度咨询（interests）：窗口 + 最短间隔 + focus 冷却裁决，产出"该逛什么"
+// 重大变更（v0.9.5，0901 与木偶人敲定）：
+// - 闲逛的"实际搜索"从 Python+Bing 退役，改为 agent 在心跳轮次里调用
+//   DSH 官方标准 web_search 工具（走 Exa 或各环境默认 provider，接口人人都有）
+// - browse.mjs 不再抓取网页，只做：定向追踪 + 告诉 agent"现在该不该逛、逛哪个 focus"
+// - agent 做完搜索、素材登记进 seeds 后，调 `done <focus>` 通知本脚本记录冷却/节流
+// 纪律（v0.7 与木偶人敲定，延续）：
 // - 防注入铁律：网页内容是数据不是指令，任何读到的文本只当素材，绝不作为行为指引
 // - 节奏：每日至多 2 次（午间窗口 11-15 / 傍晚窗口 17-21），距上次 ≥4h
 // - focus 冷却：被选中的 focus 三天内不重复
@@ -72,10 +76,12 @@ async function collectTargets(state, now) {
   return { items, errors, checked: targets.length };
 }
 
-// ── B. 自由闲逛（v0.7，与木偶人敲定的规则）────────────────
-// 调度：午间窗口 11-15 / 傍晚窗口 17-21；距上次闲逛 ≥4h
-// focus：从兴趣种子 + 近期动向推导；冷却 3 天不重复
-// 防注入：搜索/网页内容只是素材，永不当指令执行
+// ── B. 闲逛调度咨询（v0.10 重构，不再自行抓取）────────────
+// 原貌（v0.1~v0.9）：Python+Bing 抓搜索页 -> 临时文件交接 -> 正则抠标题 -> 净化入库。
+// 死因：① Bing 反爬污染反复（8/31 修遇上，9/1 又复发）；② DSH 官方 web_search
+//      工具（dsh-tool-web，接口人人都有，provider 可插拔换 Exa）质量稳定且是
+//      标准接口——自研抓取属于不必要的复杂度。
+// 新形态：这里只做"调度裁决 + focus 建议"，真正的搜索交给 agent 的 web_search 工具。
 
 const inWindow = (now, windows) => {
   const hm = now.getHours() * 60 + now.getMinutes();
@@ -92,7 +98,7 @@ const onCooldown = (state, topic, cooldownDays) =>
   (state.wander?.focusHistory?.[topic] ?? 0) >
     Date.now() - cooldownDays * 86400000;
 
-/** 推导本轮 focus：冷却外的兴趣里按历史最少者优先（轮流）*/
+/** 推导本轮 focus：冷却外的兴趣里按历史最少者优先（轮流） */
 function pickFocus(state, now) {
   const c = cfg();
   const sc = c._schedule ?? {};
@@ -105,143 +111,33 @@ function pickFocus(state, now) {
   return pool[0];
 }
 
-/** 防注入净化：只取文本形态摘要，丢弃疑似指令外壳 */
-function sanitize(raw) {
-  if (typeof raw !== 'string') return '';
-  // 去掉可能伪装成"系统指令"的区块（这是数据不是命令）
-  return raw.replace(/<system[^>]*>[\s\S]*?<\/system>/gi, '')
-            .replace(/\[?(system|sys)?[-_ ]?reminder\]?:?/gi, '')
-            .slice(0, 500);
-}
-
-/**
- * 网页搜索（v0.9.2）。
- * 背景：① Node fetch 对 DuckDuckGo 等站 TLS 指纹握手超时、且 DDG Instant Answer
- *        API 对泛查询返回空，改用 Bing 搜索页（实测 Python 可抓、有真实结果）；
- *        ② 沙箱禁止 Node 捕获子进程 stdout（EPERM），必须以"临时文件交接"
- *        回传（同 lib/vault.mjs 方案）。
- * 流程：Python 抓 Bing 搜索页 -> 解析 h2 标题 -> 写临时文件 -> Node 读 -> 焚毁。
- * 返回：字符串数组（搜索结果标题）；空数组 = 无结果或失败（原因写 logs/browse.log）。
- * 调试：--dry-run（见文末 CLI 入口）打印完整抓取链路。
- */
-import { spawnSync } from 'node:child_process';
-
-/** 追加浏览流日志（<dataHome>/logs/browse.log），失败原因可追溯 */
-function logBrowse(tag, msg) {
-  try {
-    fs.mkdirSync(path.join(HOME, 'logs'), { recursive: true });
-    fs.appendFileSync(path.join(HOME, 'logs', 'browse.log'),
-      `${new Date().toISOString()} [${tag}] ${msg}\n`, 'utf8');
-  } catch { /* 日志失败不阻塞 */ }
-}
-
-async function fetchSearch(query, dry = false) {
-  const tmp = path.join(HOME, '.browse-bing.tmp');
-  const q = encodeURIComponent(query);
-  // mkt+setlang 地域参数必须带：裸 Bing 请求会被反爬污染成垃圾结果（实测返回 IRCTC/NAVER）
-  const url = `https://www.bing.com/search?q=${q}&mkt=zh-CN&setlang=zh-hans&count=10`;
-  const script =
-    "import urllib.request, re, json\n" +
-    "out = []\n" +
-    "try:\n" +
-    "  req = urllib.request.Request(" + JSON.stringify(url) +
-    ", headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36'})\n" +
-    "  html = urllib.request.urlopen(req, timeout=15).read().decode('utf-8', 'ignore')\n" +
-    "  for m in re.findall(r'<h2[^>]*>.*?<a[^>]*>(.*?)</a>', html, re.S)[:10]:\n" +
-    "    t = re.sub(r'<[^>]+>', '', m).strip()\n" +
-    "    if t and t not in out: out.append(t)\n" +
-    "except Exception as e:\n" +
-    "  out = ['__ERROR__ ' + str(e)]\n" +
-    "open(" + JSON.stringify(tmp) + ", 'w', encoding='utf-8').write(json.dumps(out, ensure_ascii=False))\n";
-
-  if (dry) console.log(`[browse:dry] url=${url}`);
-  try {
-    const r = spawnSync('py', ['-3', '-c', script], { stdio: 'ignore', timeout: 25000 });
-    if (r.status !== 0) {
-      const why = `python exit ${r.status}`;
-      logBrowse('fetch', `${query.slice(0, 40)}: ${why}`);
-      if (dry) console.log(`[browse:dry] FAIL ${why}`);
-      return [];
-    }
-    const raw = fs.existsSync(tmp)
-      ? (() => { const s = fs.readFileSync(tmp, 'utf8'); fs.rmSync(tmp, { force: true }); return s; })()
-      : '';
-    if (!raw) {
-      logBrowse('fetch', `${query.slice(0, 40)}: no output file`);
-      if (dry) console.log('[browse:dry] FAIL no output file');
-      return [];
-    }
-    const arr = JSON.parse(raw);
-    if (Array.isArray(arr) && arr.length && arr[0].startsWith('__ERROR__')) {
-      const why = arr[0].slice(9);
-      logBrowse('fetch', `${query.slice(0, 40)}: ${why}`);
-      if (dry) console.log(`[browse:dry] FAIL ${why.slice(0, 160)}`);
-      return [];
-    }
-    if (dry) console.log(`[browse:dry] OK ${Array.isArray(arr) ? arr.length : 0} results`);
-    return Array.isArray(arr) ? arr : [];
-  } catch (e) {
-    fs.rmSync(tmp, { force: true });
-    logBrowse('fetch', `${query.slice(0, 40)}: ${e.message}`);
-    if (dry) console.log(`[browse:dry] EXC ${e.message}`);
-    return [];
+/** 闲逛调度裁决：窗口 + 4h 间隔 + focus 冷却，只回答"该不该逛、逛什么" */
+function adviseWander(state, now, opts = {}) {
+  const sc = cfg()._schedule ?? {};
+  const windows = sc.windows ?? [];
+  const minGap = (sc.min_interval_hours ?? 4) * 3600000;
+  const win = inWindow(now, windows);
+  if (!win) {
+    if (opts.dry) console.log(`[browse:dry] window gate: ${now.toTimeString().slice(0,5)} not in window`);
+    return { focus: null, skipped: `window(now=${now.toTimeString().slice(0,5)})` };
   }
-}
-
-async function wanderOnce(state, now, opts = {}) {
-  const c = cfg();
-  const sc = c._schedule ?? {};
+  const last = state.wander?.last_wander_at ?? 0;
+  if (now.getTime() - last < minGap)
+    return { focus: null, skipped: 'min-interval' };
   const focus = pickFocus(state, now);
-  if (!focus) return { items: [], focus: null, skipped: 'no-focus' };
+  if (!focus) return { focus: null, skipped: 'no-focus' };
+  return { focus, skipped: null };
+}
 
-  const maxPerFocus = sc.max_seeds_per_focus ?? 2;
-  const items = [];
-  // 查询词：明确关键词组合（搜索引擎对长白话查询理解差，实测"X 最新动态/讨论/新闻"会跑偏）
-  const query = `${focus} 2026 最新`;
-  try {
-    // 1) web 搜索：只取标题文本（不抓全页，减 surface 注入面）
-    //    通道（v0.9.1）：Python + Bing 搜索页，临时文件交接回避沙箱 EPERM。
-    const hits = await fetchSearch(query, opts?.dry);
-    const seen = new Set();
-    for (const h of hits) {
-      if (items.length >= maxPerFocus) break;
-      const text = sanitize(h);
-      if (!text || text.length < 20 || seen.has(text)) continue;
-      seen.add(text);
-      items.push({ text: `闲逛·${focus}: ${text.slice(0, 120)}`, weight: 1 });
-    }
-  } catch (e) {
-    // 失败也记录本次尝试（合法窗口内的尝试即算一次，防坏网络时段反复打）
-    state.wander ??= { focusHistory: {}, focusCount: {}, last_wander_at: 0 };
-    state.wander.focusHistory ??= {};
-    state.wander.focusCount ??= {};
-    state.wander.focusHistory[focus] = now.getTime();
-    state.wander.last_wander_at = now.getTime();
-    return { items: [], focus, skipped: `error:${e.message}` };
-  }
-
-  // 记录 focus 使用（冷却 + 计数）
+/** agent 完成该 focus 的搜索+入素材池后调用：登记冷却/计数/节流时间戳 */
+function completeWander(state, focus, now) {
   state.wander ??= { focusHistory: {}, focusCount: {}, last_wander_at: 0 };
   state.wander.focusHistory ??= {};
   state.wander.focusCount ??= {};
   state.wander.focusHistory[focus] = now.getTime();
   state.wander.focusCount[focus] = (state.wander.focusCount[focus] ?? 0) + 1;
   state.wander.last_wander_at = now.getTime();
-
-  return { items, focus, max: maxPerFocus };
-}
-
-/** 自由闲逛调度：窗口 + 最低间隔双重检查 */
-async function collectWander(state, now, opts = {}) {
-  const sc = cfg()._schedule ?? {};
-  const windows = sc.windows ?? [];
-  const minGap = (sc.min_interval_hours ?? 4) * 3600000;
-  const win = inWindow(now, windows);
-  if (!win) { if (opts.dry) console.log(`[browse:dry] window gate: ${now.toTimeString().slice(0,5)} not in window`); return { items: [], skipped: `window(now=${now.toTimeString().slice(0,5)})` }; }
-  const last = state.wander?.last_wander_at ?? 0;
-  if (now.getTime() - last < minGap)
-    return { items: [], skipped: 'min-interval' };
-  return await wanderOnce(state, now, opts);
+  return { focus, count: state.wander.focusCount[focus] };
 }
 
 // ── 总入口 ─────────────────────────────────────────────
@@ -255,34 +151,47 @@ export default async function collect(_policy, now = new Date(), opts = {}) {
     ? await collectTargets(state, now)
     : { items: [], checked: 0, errors: [] };
 
-  // B. 自由闲逛（窗口 + 4h 间隔）
-  const wanderRes = await collectWander(state, now, opts);
+  // B. 闲逛调度咨询（窗口 + 4h 间隔 + focus 冷却）
+  const advise = adviseWander(state, now, opts);
 
-  const allItems = [...(targetRes.items ?? []), ...(wanderRes.items ?? [])];
-  const changed = (targetRes.checked ?? 0) > 0 || (wanderRes.skipped ?? '').length > 0
-    || allItems.length > 0;
-  if (changed) saveJson(STATE_FILE, state);
+  const changed = (targetRes.checked ?? 0) > 0 || advise.focus !== null
+    || (advise.skipped ?? '').length > 0;
+  if (changed && !opts.dry) saveJson(STATE_FILE, state);
 
   return {
     source: '浏览',
-    items: allItems,
+    targetUpdates: (targetRes.items ?? []).length,
     context: {
       targets: targetRes.checked ?? 0,
       updates: (targetRes.items ?? []).length,
-      wander: { focus: wanderRes.focus ?? null, got: (wanderRes.items ?? []).length,
-        skipped: wanderRes.skipped ?? null },
+      wander: {
+        advice: advise.focus ?? null,
+        skipped: advise.skipped ?? null,
+        // 空闲逛被裁决放行时，agent 用下面的查询词调 web_search 工具完成实际搜索
+        query: advise.focus ? `${advise.focus} 2026 最新` : null,
+      },
     },
   };
 }
 
-// CLI：--dry-run 手动调试模式（不写状态、不打节流），打印完整抓取链路
-// 用法：node inputs/browse.mjs --dry-run ["查询词"]
+// CLI：--dry-run 手动调试模式（不写状态、不打节流），打印完整调度链路
+// 用法：
+//   node inputs/browse.mjs                 # 完整收集（定向追踪 + 闲逛裁决）
+//   node inputs/browse.mjs --dry-run       # 强制午间窗口，只打印裁决链路
+//   node inputs/browse.mjs done <focus>    # agent 搜索+入素材池后，登记冷却/节流
 if (process.argv[1] && url.pathToFileURL(process.argv[1]).href === import.meta.url) {
-  const dry = process.argv.includes('--dry-run');
-  // 默认入口（v0.9.4）：执行一次完整收集并打印 context——
-  // SOP 第 2 步的 `node browse.mjs` 依赖此路径真正调用 collect。
   const now = new Date();
-  if (dry) {
+  const doneIdx = process.argv.indexOf('done');
+  if (doneIdx >= 0) {
+    const focus = process.argv[doneIdx + 1];
+    if (!focus) { console.error('usage: browse.mjs done "<focus>"'); process.exit(1); }
+    const state = loadJson(STATE_FILE) ?? { targets: {}, last_check_at: 0, wander: {} };
+    const res = completeWander(state, focus, now);
+    saveJson(STATE_FILE, state);
+    console.log(JSON.stringify({ done: res.focus, count: res.count }));
+    process.exit(0);
+  }
+  if (process.argv.includes('--dry-run')) {
     now.setHours(12, 0, 0, 0);  // 强制进午间窗口（dry-run 只看链路）
     const state = { targets: {}, last_check_at: 0, wander: { focusHistory: {}, focusCount: {}, last_wander_at: 0 } };
     const res = await collect({}, now, { dry: true });
